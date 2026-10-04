@@ -113,7 +113,7 @@ def build_scores(df):
                     normalize(df["Distanza 52W"])*.05+normalize(df.Volatilità,False)*.10)
     df["Growth"]=(normalize(df["Crescita ricavi"])*.55+normalize(df["Margine netto"])*.20+normalize(df.ROE)*.25)
     df["Value"]=(normalize(df["P/E Fwd"],False)*.35+normalize(df["EV/EBITDA"],False)*.35+normalize(df.FCF)*.30)
-    df["Quality"]=(normalize(df.ROE)*.35+normalize(df["Margine netto"])*.35+normalize(df.Debt/Equity,False)*.30)
+    df["Quality"]=(normalize(df.ROE)*.35+normalize(df["Margine netto"])*.35+normalize(df["Debt/Equity"],False)*.30)
     # Risk score: higher means fewer obvious quantitative risk flags.
     risk=100.0
     risk = risk - np.where(df["Volatilità"]>60,20,0)
