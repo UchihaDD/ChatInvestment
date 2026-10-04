@@ -1,0 +1,31 @@
+GUIDA IPHONE — pubblicazione senza PC
+Questa guida è pensata per chi non programma.
+1. Scarica lo ZIP
+Estrai investment_scanner_v2.zip solo se hai accesso a un computer; in alternativa, i file possono essere caricati singolarmente in GitHub dal browser.
+2. GitHub
+Apri github.com in Safari → crea/accedi all’account → + → New repository.
+Nome: investment-scanner-v2
+Per la configurazione più semplice:
+	●	Public
+	●	README non necessario (lo forniamo noi)
+3. Carica i tre file
+Nel repository: Add file → Upload files
+Carica:
+	●	app.py
+	●	requirements.txt
+	●	README.md
+Commit.
+4. Streamlit
+Apri share.streamlit.io → Continue with GitHub → autorizza l’accesso al repository.
+Poi: Create app → repository → main → app.py → Deploy.
+Attendi il completamento.
+5. Schermata Home
+Apri l’URL generato in Safari: Condividi → Aggiungi alla schermata Home.
+6. Uso
+	●	Orizzonte: scegli 1–3 mesi, 6–12 mesi, 3–5 anni o Bilanciato.
+	●	Universo: S&P 500, Nasdaq-100, ETF selezionati, Crypto o watchlist.
+	●	Avvia scansione.
+	●	Apri un candidato.
+	●	Copia il prompt AI in ChatGPT.
+Importante
+La prima pubblicazione richiede GitHub e Streamlit, ma dopo non devi più usare terminale o Python.
