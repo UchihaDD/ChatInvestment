@@ -1,0 +1,39 @@
+name: ChatInvestment Editor
+
+on:
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "File da modificare"
+        required: true
+        default: "app.py"
+      content:
+        description: "Nuovo contenuto del file"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  update-file:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update file
+        env:
+          FILE_PATH: ${{ inputs.file }}
+          FILE_CONTENT: ${{ inputs.content }}
+        run: |
+          printf '%s' "$FILE_CONTENT" > "$FILE_PATH"
+
+      - name: Commit changes
+        run: |
+          git config user.name "ChatInvestment Bot"
+          git config user.email "actions@github.com"
+          git add "$FILE_PATH"
+          git diff --cached --quiet || git commit -m "Update $FILE_PATH"
+          git push
