@@ -1,273 +1,414 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import requests
-import yfinance as yf
-from datetime import datetime, timezone
+from __future__ import annotations
 
-st.set_page_config(page_title="Investment Scanner", page_icon="🔎", layout="wide", initial_sidebar_state="collapsed")
+from datetime import datetime, timezone
+import math
+import time
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+import yfinance as yf
+
+st.set_page_config(
+    page_title="ChatInvestment",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 st.markdown("""
 <style>
-.block-container {padding-top: 1rem; padding-bottom: 3rem; max-width: 1200px;}
-h1 {font-size: 2rem !important;}
-div[data-testid="stMetricValue"] {font-size: 1.35rem;}
-@media (max-width: 700px) {
-  .block-container {padding-left: .8rem; padding-right: .8rem;}
-  h1 {font-size: 1.6rem !important;}
-}
+.block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 1400px;}
+div[data-testid="stMetric"] {background: rgba(120,120,120,.07); padding: .65rem; border-radius: .7rem;}
+.small-note {font-size: .85rem; opacity: .8;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🔎 Investment Scanner")
-st.caption("V2 · scanner quantitativo gratuito · progettato per uso da iPhone")
+st.title("📈 ChatInvestment")
+st.caption("Scanner informativo per azioni, ETF, crypto e mercati — dati gratuiti, non garantiti in tempo reale.")
 
-PROFILES = {
-    "1–3 mesi": {"m": .50, "g": .10, "v": .10, "q": .10, "risk": .20},
-    "6–12 mesi": {"m": .30, "g": .25, "v": .15, "q": .20, "risk": .10},
-    "3–5 anni": {"m": .10, "g": .30, "v": .20, "q": .30, "risk": .10},
-    "Bilanciato": {"m": .25, "g": .25, "v": .15, "q": .25, "risk": .10},
+# --- Universe ---
+MARKETS = {
+    "Nasdaq Composite": "^IXIC",
+    "S&P 500": "^GSPC",
+    "FTSE MIB": "FTSEMIB.MI",
+    "Petrolio WTI": "CL=F",
+    "Oro": "GC=F",
+    "Gas naturale USA": "NG=F",
 }
 
-DEFAULT_ETFS = ["VWCE.DE","SWDA.MI","EIMI.MI","CSPX.L","VUAA.MI","AGGH.MI","IWDA.AS","IUSQ.DE"]
-DEFAULT_CRYPTO = ["BTC-USD","ETH-USD","SOL-USD","XRP-USD","BNB-USD","ADA-USD","LINK-USD","AVAX-USD"]
+ETF_DEFAULTS = [
+    "VWCE.DE", "SWDA.MI", "EIMI.MI", "CSPX.L",
+    "VUAA.MI", "AGGH.MI", "IWDA.AS", "IUSQ.DE",
+]
+CRYPTO_DEFAULTS = [
+    "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD",
+    "BNB-USD", "ADA-USD", "LINK-USD", "AVAX-USD",
+]
+WATCHLIST_DEFAULTS = ["CRDO", "NVTS", "AEHR", "TPRO", "ONDS", "FCEL"]
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def sp500_universe():
-    try:
-        t = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
-        return t["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist()
-    except Exception:
-        return ["AAPL","MSFT","NVDA","AMZN","GOOGL","META","AVGO","TSLA","BRK-B","LLY","JPM","V","MA","XOM","COST","WMT","NFLX","ORCL","AMD","ADBE"]
+FALLBACK_SP500 = [
+    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","BRK-B","LLY","AVGO","JPM",
+    "TSLA","WMT","XOM","UNH","V","MA","COST","ORCL","HD","PG","NFLX","ABBV",
+    "CRM","BAC","CVX","KO","MRK","AMD","PEP","ADBE","TMO","LIN","CSCO","ACN",
+    "MCD","WFC","QCOM","IBM","CAT","GE","AMGN","TXN","PM","ISRG","NOW","INTU",
+    "DIS","GS","SPGI","UBER","AMAT","LOW","BKNG","BLK","AXP","NEE","HON","PFE",
+]
+FALLBACK_NASDAQ = [
+    "AAPL","MSFT","NVDA","AMZN","META","AVGO","GOOGL","GOOG","TSLA","COST",
+    "NFLX","AMD","PEP","ADBE","CSCO","TMUS","QCOM","INTU","AMGN","TXN","ISRG",
+    "BKNG","HON","AMAT","LRCX","MU","ADI","PANW","KLAC","SBUX","GILD","MDLZ",
+    "VRTX","REGN","SNPS","CDNS","MELI","CRWD","ORLY","CTAS","MAR","ABNB","FTNT",
+]
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def nasdaq100_universe():
+@st.cache_data(ttl=900, show_spinner=False)
+def get_history(symbol: str, period: str = "1y") -> pd.DataFrame:
+    """Download adjusted daily history. Cached for 15 minutes."""
     try:
-        t = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")[4]
-        col = [c for c in t.columns if str(c).lower() in ["ticker","ticker symbol","symbol"]]
-        if col:
-            return t[col[0]].astype(str).str.replace(".", "-", regex=False).tolist()
+        df = yf.Ticker(symbol).history(period=period, auto_adjust=True, actions=False)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.copy()
+        df.index = pd.to_datetime(df.index)
+        if "Close" not in df:
+            return pd.DataFrame()
+        df = df.dropna(subset=["Close"])
+        return df
     except Exception:
-        pass
-    return ["AAPL","MSFT","NVDA","AMZN","META","AVGO","GOOGL","GOOG","TSLA","COST","NFLX","AMD","ADBE","QCOM","INTU","AMAT","MU","PANW","CRWD","PLTR"]
+        return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def crypto_universe():
+def get_universe(kind: str) -> list[str]:
+    """Try to load current index constituents, with a small fallback if unavailable."""
     try:
-        url="https://api.coingecko.com/api/v3/coins/markets"
-        params={"vs_currency":"usd","order":"market_cap_desc","per_page":100,"page":1,"sparkline":"false"}
-        r=requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        data=r.json()
-        return [f"{x['id']}" for x in data]
+        if kind == "S&P 500":
+            tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
+            col = "Symbol"
+            syms = tables[0][col].astype(str).str.replace(".", "-", regex=False).tolist()
+            if len(syms) > 100:
+                return syms
+        elif kind == "Nasdaq-100":
+            tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100")
+            for table in tables:
+                for col in ("Ticker", "Symbol"):
+                    if col in table.columns:
+                        syms = table[col].astype(str).tolist()
+                        syms = [s for s in syms if s.isupper() and 1 <= len(s) <= 6 and s.isalpha()]
+                        if len(syms) > 50:
+                            return list(dict.fromkeys(syms))
     except Exception:
-        return ["bitcoin","ethereum","solana","ripple","binancecoin","cardano","chainlink","avalanche-2"]
+        pass
+    return FALLBACK_SP500 if kind == "S&P 500" else FALLBACK_NASDAQ
 
-def normalize(s, higher=True):
-    s=pd.to_numeric(s, errors="coerce")
-    if not higher: s=-s
-    return s.rank(pct=True)*100
+def pct_change(close: pd.Series, bars: int) -> float:
+    if len(close) <= bars or pd.isna(close.iloc[-bars-1]) or close.iloc[-bars-1] == 0:
+        return np.nan
+    return float((close.iloc[-1] / close.iloc[-bars-1] - 1) * 100)
 
-def safe(v):
+def safe_info(symbol: str) -> dict:
     try:
-        return float(v) if v is not None and not pd.isna(v) else np.nan
-    except: return np.nan
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def scan_ticker(symbol, period="2y"):
-    try:
-        tk=yf.Ticker(symbol)
-        h=tk.history(period=period, auto_adjust=True)
-        if h is None or h.empty or len(h)<70: return None
-        c=h["Close"].dropna()
-        if len(c)<70: return None
-        def ret(n):
-            return c.iloc[-1]/c.iloc[-n-1]-1 if len(c)>n else np.nan
-        r1,r3,r6,r12=ret(21),ret(63),ret(126),ret(252)
-        vol=float(c.pct_change().dropna().tail(60).std()*np.sqrt(252))
-        ma50=float(c.tail(50).mean())
-        ma200=float(c.tail(min(200,len(c))).mean())
-        high=float(c.tail(min(252,len(c))).max())
-        info=tk.get_info()
-        return {
-            "Ticker":symbol, "Prezzo":float(c.iloc[-1]),
-            "R1M":r1*100,"R3M":r3*100,"R6M":r6*100,"R12M":r12*100,
-            "Volatilità":vol*100,"Distanza 52W":(c.iloc[-1]/high-1)*100,
-            "MA50":bool(c.iloc[-1]>ma50),"MA200":bool(c.iloc[-1]>ma200),
-            "P/E Fwd":safe(info.get("forwardPE")),"EV/EBITDA":safe(info.get("enterpriseToEbitda")),
-            "Crescita ricavi":safe(info.get("revenueGrowth"))*100 if safe(info.get("revenueGrowth"))==safe(info.get("revenueGrowth")) else np.nan,
-            "Margine netto":safe(info.get("profitMargins"))*100 if safe(info.get("profitMargins"))==safe(info.get("profitMargins")) else np.nan,
-            "ROE":safe(info.get("returnOnEquity"))*100 if safe(info.get("returnOnEquity"))==safe(info.get("returnOnEquity")) else np.nan,
-            "Debt/Equity":safe(info.get("debtToEquity")),
-            "FCF":safe(info.get("freeCashflow")),
-            "Nome":info.get("shortName") or symbol,
-            "Settore":info.get("sector") or "N/D",
-            "Market Cap":safe(info.get("marketCap")),
-        }
+        # Info can be slow or unavailable; do not let it stop price analysis.
+        return yf.Ticker(symbol).get_info() or {}
     except Exception:
+        return {}
+
+def analyse_symbol(symbol: str, include_fundamentals: bool = False) -> dict | None:
+    hist = get_history(symbol, "2y" if include_fundamentals else "1y")
+    if hist.empty or len(hist) < 30:
         return None
+    close = hist["Close"].dropna()
+    price = float(close.iloc[-1])
+    if not math.isfinite(price) or price <= 0:
+        return None
+    r1w, r1m, r3m, r6m, r12m = [pct_change(close, n) for n in (5, 21, 63, 126, 252)]
+    ret = close.pct_change().dropna()
+    vol = float(ret.tail(60).std() * np.sqrt(252) * 100) if len(ret) >= 20 else np.nan
+    ma50 = float(close.tail(50).mean()) if len(close) >= 50 else np.nan
+    ma200 = float(close.tail(200).mean()) if len(close) >= 200 else np.nan
+    high52 = float(close.tail(min(252, len(close))).max())
+    dist_high = float((price / high52 - 1) * 100) if high52 else np.nan
+    row = {
+        "Ticker": symbol,
+        "Prezzo": price,
+        "1 settimana %": r1w,
+        "1 mese %": r1m,
+        "3 mesi %": r3m,
+        "6 mesi %": r6m,
+        "12 mesi %": r12m,
+        "Volatilità ann. %": vol,
+        "Media 50g": ma50,
+        "Media 200g": ma200,
+        "Distanza max 52s %": dist_high,
+        "Ultimo dato": str(close.index[-1].date()),
+    }
+    if include_fundamentals:
+        info = safe_info(symbol)
+        row.update({
+            "P/E forward": info.get("forwardPE", np.nan),
+            "EV/EBITDA": info.get("enterpriseToEbitda", np.nan),
+            "Crescita ricavi %": (info.get("revenueGrowth", np.nan) * 100
+                                  if pd.notna(info.get("revenueGrowth", np.nan)) else np.nan),
+            "Margine netto %": (info.get("profitMargins", np.nan) * 100
+                                if pd.notna(info.get("profitMargins", np.nan)) else np.nan),
+            "ROE %": (info.get("returnOnEquity", np.nan) * 100
+                      if pd.notna(info.get("returnOnEquity", np.nan)) else np.nan),
+            "Debt/Equity": info.get("debtToEquity", np.nan),
+            "Market cap": info.get("marketCap", np.nan),
+            "Settore": info.get("sector", "n/d"),
+        })
+    return row
 
-def build_scores(df):
-    df=df.copy()
-    df["Momentum"]=(normalize(df.R3M)*.25+normalize(df.R6M)*.35+normalize(df.R12M)*.25+
-                    normalize(df["Distanza 52W"])*.05+normalize(df.Volatilità,False)*.10)
-    df["Growth"]=(normalize(df["Crescita ricavi"])*.55+normalize(df["Margine netto"])*.20+normalize(df.ROE)*.25)
-    df["Value"]=(normalize(df["P/E Fwd"],False)*.35+normalize(df["EV/EBITDA"],False)*.35+normalize(df.FCF)*.30)
-    df["Quality"]=(normalize(df.ROE)*.35+normalize(df["Margine netto"])*.35+normalize(df["Debt/Equity"],False)*.30)
-    # Risk score: higher means fewer obvious quantitative risk flags.
-    risk=100.0
-    risk = risk - np.where(df["Volatilità"]>60,20,0)
-    risk = risk - np.where(df["Debt/Equity"]>250,20,0)
-    risk = risk - np.where(df["Distanza 52W"]<-30,15,0)
-    risk = risk - np.where((df["MA50"]==False)&(df["MA200"]==False),15,0)
-    df["Risk discipline"]=np.clip(risk,0,100)
-    p=st.session_state.get("profile","Bilanciato")
-    w=PROFILES[p]
-    df["Scanner Score"]=(df.Momentum*w["m"]+df.Growth*w["g"]+df.Value*w["v"]+
-                         df.Quality*w["q"]+df["Risk discipline"]*w["risk"])
-    return df.sort_values("Scanner Score",ascending=False,na_position="last").reset_index(drop=True)
+def rank_percentile(series: pd.Series, higher_is_better: bool = True) -> pd.Series:
+    values = pd.to_numeric(series, errors="coerce")
+    if values.notna().sum() < 2:
+        return pd.Series(50.0, index=series.index)
+    rank = values.rank(pct=True) * 100
+    if not higher_is_better:
+        rank = 100 - rank
+    return rank.fillna(50.0)
 
+def score_stocks(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    out["Punteggio momentum"] = (
+        rank_percentile(out["3 mesi %"]) * .35 +
+        rank_percentile(out["6 mesi %"]) * .35 +
+        rank_percentile(out["12 mesi %"]) * .20 +
+        rank_percentile(out["Volatilità ann. %"], False) * .10
+    )
+    out["Punteggio qualità"] = (
+        rank_percentile(out["Crescita ricavi %"]) * .30 +
+        rank_percentile(out["Margine netto %"]) * .25 +
+        rank_percentile(out["ROE %"]) * .25 +
+        rank_percentile(out["Debt/Equity"], False) * .20
+    )
+    out["Punteggio valore"] = (
+        rank_percentile(out["P/E forward"], False) * .40 +
+        rank_percentile(out["EV/EBITDA"], False) * .35 +
+        rank_percentile(out["Distanza max 52s %"], False) * .25
+    )
+    out["Punteggio razzo"] = (
+        rank_percentile(out["1 settimana %"]) * .15 +
+        rank_percentile(out["1 mese %"]) * .25 +
+        rank_percentile(out["3 mesi %"]) * .35 +
+        rank_percentile(out["6 mesi %"]) * .15 +
+        rank_percentile(out["Volatilità ann. %"], False) * .10
+    )
+    # Heuristic flags, not a fair-value estimate or a buy signal.
+    out["Possibile sconto"] = (
+        (out["Distanza max 52s %"] <= -20) &
+        (out["P/E forward"].notna()) &
+        (out["P/E forward"] > 0) &
+        (out["Punteggio qualità"] >= 50)
+    )
+    out["Sotto media 200g"] = out["Prezzo"] < out["Media 200g"]
+    out["Rischio elevato"] = (
+        (out["Volatilità ann. %"] > 60) |
+        (out["Debt/Equity"] > 250) |
+        (out["Distanza max 52s %"] < -35)
+    )
+    return out.sort_values("Punteggio razzo", ascending=False)
+
+def scan_many(symbols: list[str], include_fundamentals: bool, limit: int) -> pd.DataFrame:
+    rows = []
+    progress = st.progress(0, text="Avvio analisi…")
+    unique = list(dict.fromkeys([str(s).strip().upper() for s in symbols if str(s).strip()]))[:limit]
+    for i, symbol in enumerate(unique):
+        result = analyse_symbol(symbol, include_fundamentals=include_fundamentals)
+        if result:
+            rows.append(result)
+        progress.progress((i + 1) / max(len(unique), 1), text=f"Analisi {i+1}/{len(unique)}: {symbol}")
+        # A small pause reduces bursts against the free data source.
+        if i % 8 == 7:
+            time.sleep(.2)
+    progress.empty()
+    df = pd.DataFrame(rows)
+    return score_stocks(df) if include_fundamentals and not df.empty else df
+
+def fmt_table(df: pd.DataFrame, money: bool = False) -> pd.DataFrame:
+    out = df.copy()
+    for col in out.columns:
+        if col == "Prezzo" or col.startswith("Media "):
+            out[col] = pd.to_numeric(out[col], errors="coerce").round(3)
+        elif "%" in col or col.startswith("Punteggio"):
+            out[col] = pd.to_numeric(out[col], errors="coerce").round(1)
+    return out
+
+def show_market_dashboard():
+    st.subheader("Andamento dei mercati")
+    st.caption("Percentuali calcolate sui dati storici scaricati. Per i futures, il simbolo rappresenta il contratto continuo disponibile sulla fonte.")
+    rows = []
+    for name, symbol in MARKETS.items():
+        h = get_history(symbol, "1y")
+        if h.empty or len(h) < 2:
+            rows.append({"Mercato": name, "Ticker": symbol, "Ultimo": np.nan,
+                         "1 giorno %": np.nan, "1 settimana %": np.nan,
+                         "1 mese %": np.nan, "3 mesi %": np.nan, "Ultimo dato": "non disponibile"})
+            continue
+        c = h["Close"].dropna()
+        rows.append({
+            "Mercato": name, "Ticker": symbol, "Ultimo": float(c.iloc[-1]),
+            "1 giorno %": pct_change(c, 1), "1 settimana %": pct_change(c, 5),
+            "1 mese %": pct_change(c, 21), "3 mesi %": pct_change(c, 63),
+            "Ultimo dato": str(c.index[-1].date()),
+        })
+    st.dataframe(fmt_table(pd.DataFrame(rows)), use_container_width=True, hide_index=True)
+    st.caption("Se un mercato appare non disponibile, il simbolo potrebbe non essere supportato dalla fonte gratuita in quel momento.")
+
+def render_asset_page(asset_type: str, defaults: list[str]):
+    st.subheader(f"Pagina {asset_type}")
+    raw = st.text_area(
+        "Ticker da analizzare (separati da virgola)",
+        value=", ".join(defaults),
+        height=90,
+        key=f"tickers_{asset_type}",
+        help="Puoi sostituire i simboli con quelli che vuoi monitorare. Esempi: VWCE.DE, BTC-USD.",
+    )
+    limit = st.slider("Numero massimo di strumenti", 4, 40, min(max(len(defaults), 4), 20), key=f"limit_{asset_type}")
+    if st.button(f"Aggiorna {asset_type}", key=f"scan_{asset_type}", type="primary"):
+        symbols = [x.strip() for x in raw.replace("\n", ",").split(",") if x.strip()]
+        with st.spinner("Scarico lo storico…"):
+            df = scan_many(symbols, include_fundamentals=False, limit=limit)
+        if df.empty:
+            st.warning("Nessun dato disponibile per i ticker inseriti. Controlla i simboli e riprova.")
+        else:
+            st.session_state[f"results_{asset_type}"] = df
+    result = st.session_state.get(f"results_{asset_type}", pd.DataFrame())
+    if not result.empty:
+        cols = ["Ticker", "Prezzo", "1 settimana %", "1 mese %", "3 mesi %", "6 mesi %", "12 mesi %", "Volatilità ann. %", "Ultimo dato"]
+        st.dataframe(fmt_table(result[[c for c in cols if c in result.columns]]), use_container_width=True, hide_index=True)
+        st.download_button("Scarica CSV", result.to_csv(index=False).encode("utf-8"), f"chatinvestment_{asset_type.lower()}.csv", "text/csv")
+
+# --- Sidebar ---
 with st.sidebar:
-    st.header("Configurazione")
-    profile=st.selectbox("Orizzonte",list(PROFILES.keys()),index=3)
-    st.session_state["profile"]=profile
-    universe=st.selectbox("Universo",[
-        "S&P 500","Nasdaq-100","ETF selezionati","Crypto top 100","Watchlist personale"
-    ])
-    period=st.selectbox("Storico prezzi",["1y","2y","5y"],index=1)
-    max_assets=st.slider("Numero massimo strumenti",10,100,50,step=10)
-    if universe=="Watchlist personale":
-        custom=st.text_area("Ticker separati da virgola","AAPL,MSFT,NVDA,AMZN,GOOGL,META,AVGO,TSLA")
-    else:
-        custom=""
-    st.caption("Dati: fonti gratuite; disponibilità e qualità possono variare.")
+    st.header("Impostazioni")
+    universe = st.selectbox("Universo azionario", ["Watchlist", "S&P 500", "Nasdaq-100"])
+    max_assets = st.slider("Numero massimo titoli da scansionare", 5, 100, 30, step=5)
+    st.caption("La prima scansione di molti titoli può richiedere tempo. Parti da 20–30.")
 
-tabs=st.tabs(["🔎 Scanner","📌 Candidato","🧪 Metodo","📱 Uso da iPhone"])
+tabs = st.tabs(["📈 Mercati", "🔎 Scanner azioni", "🚀 Prossimo razzo", "🏷️ Azioni a sconto", "📊 ETF", "₿ Crypto", "📌 Candidato", "🧪 Metodo", "📱 Guida iPhone"])
 
 with tabs[0]:
-    st.subheader(f"Scanner · {profile}")
-    if universe=="S&P 500":
-        symbols=sp500_universe()[:max_assets]
-    elif universe=="Nasdaq-100":
-        symbols=nasdaq100_universe()[:max_assets]
-    elif universe=="ETF selezionati":
-        symbols=DEFAULT_ETFS[:max_assets]
-    elif universe=="Crypto top 100":
-        # CoinGecko IDs need mapping to Yahoo symbols for this simple free V2.
-        symbols=DEFAULT_CRYPTO[:max_assets]
-    else:
-        symbols=[x.strip().upper() for x in custom.replace("\n",",").split(",") if x.strip()][:max_assets]
+    show_market_dashboard()
+    if st.button("Ricarica dati mercati", key="reload_markets"):
+        st.cache_data.clear()
+        st.rerun()
 
-    st.caption(f"Universo operativo: {len(symbols)} strumenti · premi il pulsante per aggiornare.")
-    run=st.button("🚀 Avvia scansione",type="primary",use_container_width=True)
-
-    if run:
-        rows=[]
-        bar=st.progress(0)
-        for i,s in enumerate(symbols):
-            row=scan_ticker(s,period)
-            if row: rows.append(row)
-            bar.progress((i+1)/len(symbols))
-        bar.empty()
-        if rows:
-            df=build_scores(pd.DataFrame(rows))
-            st.session_state["df"]=df
-            st.session_state["scan_time"]=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        else:
-            st.error("Nessun dato disponibile. Riprova o riduci l'universo.")
-
-    if "df" in st.session_state:
-        df=st.session_state["df"]
-        c1,c2,c3=st.columns(3)
-        c1.metric("Strumenti",len(df))
-        c2.metric("Sopra MA50",int(df.MA50.sum()))
-        c3.metric("Sopra MA200",int(df.MA200.sum()))
-        st.caption(f"Ultima scansione: {st.session_state.get('scan_time','—')}")
-        n=st.slider("Risultati",5,min(50,len(df)),min(20,len(df)))
-        cols=["Ticker","Nome","Prezzo","R3M","R6M","R12M","Volatilità","P/E Fwd","Crescita ricavi","ROE","Momentum","Growth","Value","Quality","Risk discipline","Scanner Score"]
-        out=df.head(n)[cols].copy()
-        out.columns=["Ticker","Nome","Prezzo","3M %","6M %","12M %","Vol %","P/E","Ricavi %","ROE %","Momentum","Growth","Value","Quality","Risk","Scanner"]
-        st.dataframe(out,use_container_width=True,hide_index=True)
-        st.download_button("⬇️ Scarica CSV",df.to_csv(index=False).encode("utf-8-sig"),"investment_scanner_results.csv","text/csv")
-        st.info("Lo score serve a ordinare i candidati all'interno della scansione. Non è una previsione di rendimento né una raccomandazione.")
+# Build equity universe only when needed.
+if universe == "Watchlist":
+    equity_symbols = WATCHLIST_DEFAULTS
+elif universe == "S&P 500":
+    equity_symbols = get_universe("S&P 500")
+else:
+    equity_symbols = get_universe("Nasdaq-100")
 
 with tabs[1]:
-    st.subheader("📌 Candidato da approfondire")
-    if "df" not in st.session_state:
-        st.info("Esegui prima una scansione.")
-    else:
-        df=st.session_state["df"]
-        choice=st.selectbox("Ticker",df.Ticker.tolist())
-        row=df[df.Ticker==choice].iloc[0]
-        st.markdown(f"### {row['Nome']} · `{choice}`")
-        a,b,c=st.columns(3)
-        a.metric("Scanner",f"{row['Scanner Score']:.1f}/100")
-        b.metric("Momentum",f"{row['Momentum']:.1f}")
-        c.metric("Quality",f"{row['Quality']:.1f}")
-        st.write("**Perché è entrato nello screening**")
-        reasons=[]
-        if row.R12M>0: reasons.append(f"rendimento 12 mesi {row.R12M:.1f}%")
-        if row.R6M>0: reasons.append(f"rendimento 6 mesi {row.R6M:.1f}%")
-        if row.MA50: reasons.append("prezzo sopra MA50")
-        if row.MA200: reasons.append("prezzo sopra MA200")
-        if pd.notna(row["Crescita ricavi"]) and row["Crescita ricavi"]>0: reasons.append(f"crescita ricavi {row['Crescita ricavi']:.1f}%")
-        st.write(" · ".join(reasons) if reasons else "Nessun segnale quantitativo forte disponibile.")
-        st.write("**Rischi quantitativi da verificare**")
-        risks=[]
-        if row.Volatilità>60: risks.append("volatilità elevata")
-        if pd.notna(row["Debt/Equity"]) and row["Debt/Equity"]>250: risks.append("Debt/Equity elevato")
-        if row["Distanza 52W"]<-30: risks.append("molto distante dal massimo a 52 settimane")
-        if not row.MA50 and not row.MA200: risks.append("sotto MA50 e MA200")
-        st.write(" · ".join(risks) if risks else "Nessun flag quantitativo principale rilevato.")
-        prompt=f"""Analizza {choice} come candidato di investimento per un orizzonte {profile}.
-Usa informazioni aggiornate e fonti primarie quando possibile.
-Dati dello scanner:
-- Momentum: {row.Momentum:.1f}
-- Growth: {row.Growth:.1f}
-- Value: {row.Value:.1f}
-- Quality: {row.Quality:.1f}
-- Risk discipline: {row['Risk discipline']:.1f}
-- 3M: {row.R3M:.1f}%, 6M: {row.R6M:.1f}%, 12M: {row.R12M:.1f}%
-- P/E forward: {row['P/E Fwd']}
-- Crescita ricavi: {row['Crescita ricavi']}%
-- ROE: {row.ROE}%
-- Debt/Equity: {row['Debt/Equity']}
-Voglio: tesi, catalizzatori, cosa è già prezzato, rischi, dati contrari alla tesi e cosa monitorare nei prossimi mesi. Non dare certezze e separa fatti da interpretazioni."""
-        st.markdown("### Prompt per la ricerca AI")
-        st.code(prompt,language="text")
-        st.caption("Copia questo prompt in ChatGPT per fare la fase qualitativa senza pagare API esterne.")
+    st.subheader("Scanner azionario")
+    st.write("Confronta momentum, qualità, valutazione e alcuni indicatori di rischio.")
+    custom = st.text_input("Aggiungi ticker (facoltativo, separati da virgola)", value="")
+    if st.button("Avvia scanner azioni", type="primary", key="start_equity"):
+        symbols = equity_symbols + [x.strip() for x in custom.split(",") if x.strip()]
+        with st.spinner("Analisi dei titoli: può richiedere qualche minuto…"):
+            results = scan_many(symbols, True, max_assets)
+        if results.empty:
+            st.warning("Nessun risultato. Riprova più tardi o usa una watchlist più piccola.")
+        else:
+            st.session_state["equity_results"] = results
+    df = st.session_state.get("equity_results", pd.DataFrame())
+    if not df.empty:
+        display_cols = ["Ticker", "Prezzo", "1 settimana %", "1 mese %", "3 mesi %", "6 mesi %", "12 mesi %",
+                        "Punteggio momentum", "Punteggio qualità", "Punteggio valore", "Punteggio razzo",
+                        "Possibile sconto", "Rischio elevato", "Ultimo dato"]
+        st.dataframe(fmt_table(df[[c for c in display_cols if c in df.columns]]), use_container_width=True, hide_index=True)
+        st.download_button("Scarica risultati scanner CSV", df.to_csv(index=False).encode("utf-8"), "chatinvestment_scanner.csv", "text/csv")
 
 with tabs[2]:
-    st.subheader("🧪 Come funziona V2")
-    st.markdown("""
-**1. Universo** → S&P 500 / Nasdaq-100 / ETF / watchlist.
-
-**2. Quant** → momentum, crescita, value, quality e disciplina del rischio.
-
-**3. Profilo temporale** → i pesi cambiano tra 1–3 mesi, 6–12 mesi, 3–5 anni e bilanciato.
-
-**4. Ricerca qualitativa** → il software genera un prompt pronto per ChatGPT. Non finge di avere un LLM finanziato da un'API gratuita.
-
-**5. Decisione** → lo scanner crea una lista di situazioni da studiare; la decisione rimane tua.
-    """)
-    st.warning("V2 non è ancora un backtest point-in-time professionale. Prima di usarla per capitale reale, la prossima fase deve validare il metodo su dati storici evitando look-ahead e survivorship bias.")
+    st.subheader("🚀 Modalità “Prossimo razzo”")
+    st.write("Ordina i titoli per accelerazione recente e momentum su più orizzonti. Non prevede con certezza i futuri rialzi.")
+    df = st.session_state.get("equity_results", pd.DataFrame())
+    if df.empty:
+        st.info("Prima avvia lo scanner nella scheda “Scanner azioni”.")
+    else:
+        n = st.slider("Quanti candidati mostrare", 3, min(20, len(df)), min(10, len(df)), key="rocket_n")
+        cols = ["Ticker", "Prezzo", "1 settimana %", "1 mese %", "3 mesi %", "6 mesi %", "Volatilità ann. %", "Punteggio razzo", "Rischio elevato"]
+        st.dataframe(fmt_table(df.sort_values("Punteggio razzo", ascending=False)[[c for c in cols if c in df.columns]].head(n)),
+                     use_container_width=True, hide_index=True)
+        st.warning("Un punteggio alto non equivale a una probabilità di rialzo. Titoli con momentum elevato possono invertire rapidamente.")
 
 with tabs[3]:
-    st.subheader("📱 Il tuo flusso quotidiano")
-    st.markdown("""
-### Una volta pubblicata
-1. Apri il link dello scanner in Safari.
-2. Premi **Condividi → Aggiungi alla schermata Home**.
-3. Avrai un'icona come una normale app.
-4. Scegli l'orizzonte.
-5. Scegli l'universo.
-6. Premi **Avvia scansione**.
-7. Apri i candidati.
-8. Copia il prompt AI in ChatGPT.
-9. Approfondisci solo i candidati che superano il controllo qualitativo.
+    st.subheader("🏷️ Modalità “Azioni a sconto”")
+    st.write("Euristica iniziale: titolo lontano dal massimo a 52 settimane, multiplo forward positivo e punteggio qualità almeno mediano.")
+    df = st.session_state.get("equity_results", pd.DataFrame())
+    if df.empty:
+        st.info("Prima avvia lo scanner nella scheda “Scanner azioni”.")
+    else:
+        discounted = df[df["Possibile sconto"]].copy()
+        if discounted.empty:
+            st.info("Nessun titolo soddisfa tutti i criteri attuali. Non significa che non esistano opportunità.")
+        else:
+            cols = ["Ticker", "Prezzo", "Distanza max 52s %", "P/E forward", "EV/EBITDA",
+                    "Crescita ricavi %", "Margine netto %", "ROE %", "Sotto media 200g", "Rischio elevato"]
+            st.dataframe(fmt_table(discounted[[c for c in cols if c in discounted.columns]]),
+                         use_container_width=True, hide_index=True)
+        st.caption("Essere scesi dal massimo non prova che un titolo sia sottovalutato. Verificare debito, utili, prospettive e notizie.")
 
-Non devi installare Python, usare terminale o avere un PC.
-    """)
+with tabs[4]:
+    render_asset_page("ETF", ETF_DEFAULTS)
+
+with tabs[5]:
+    render_asset_page("Crypto", CRYPTO_DEFAULTS)
+    st.warning("Le crypto possono subire oscillazioni estreme; lo storico non garantisce risultati futuri.")
+
+with tabs[6]:
+    st.subheader("Candidato: scheda di verifica")
+    ticker = st.text_input("Ticker da esaminare", value="CRDO", key="candidate_ticker").strip().upper()
+    if st.button("Analizza candidato", key="candidate_button", type="primary"):
+        row = analyse_symbol(ticker, include_fundamentals=True)
+        if not row:
+            st.warning("Dati non disponibili per questo ticker.")
+        else:
+            st.session_state["candidate_result"] = row
+    row = st.session_state.get("candidate_result")
+    if row:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Prezzo ultimo dato", f'{row.get("Prezzo", np.nan):,.3f}')
+        c2.metric("1 mese", f'{row.get("1 mese %", np.nan):.1f}%' if pd.notna(row.get("1 mese %")) else "n/d")
+        c3.metric("Volatilità ann.", f'{row.get("Volatilità ann. %", np.nan):.1f}%' if pd.notna(row.get("Volatilità ann. %")) else "n/d")
+        st.json({k: (None if isinstance(v, float) and not math.isfinite(v) else v) for k, v in row.items()})
+        st.text_area("Domanda pronta per ChatGPT", value=(
+            f"Analizza {ticker} con orizzonte 2–5 giorni e 1–4 settimane. "
+            "Distingui prezzi verificati da ipotesi, valuta scenario rialzista/neutrale/ribassista, "
+            "livello di invalidazione, rischi e rapporto rischio/rendimento. Non presentare stime come certezze."
+        ), height=110)
+    st.caption("Questa scheda non esegue ordini e non è una raccomandazione personalizzata.")
+
+with tabs[7]:
+    st.subheader("Metodo e limiti")
+    st.markdown("""
+- **Performance**: variazioni calcolate sul prezzo di chiusura storico disponibile.
+- **Momentum**: confronta rendimenti su più finestre temporali.
+- **Qualità e valore**: dipendono dai fondamentali che la fonte riesce a fornire; molti campi possono essere vuoti.
+- **Prossimo razzo**: classifica euristica, non previsione statistica calibrata.
+- **Azioni a sconto**: filtro preliminare, non calcolo del fair value.
+- **Dati**: aggiornati quando vengono richiesti, con cache di circa 15 minuti per lo storico.
+- **Affidabilità**: la fonte gratuita può ritardare, limitare richieste o restituire simboli non disponibili.
+- **Nessun ordine automatico**: l'app è uno strumento di analisi, non collega il conto Fineco e non opera con leva.
+""")
+    st.caption("Prima di usare qualsiasi idea operativa, verifica quotazioni, spread, liquidità, notizie e costi direttamente presso il tuo intermediario.")
+
+with tabs[8]:
+    st.subheader("Aggiornare ChatInvestment da iPhone")
+    st.markdown("""
+1. Apri il repository GitHub collegato alla tua app.
+2. Apri `app.py` e premi la matita **Edit**.
+3. Prima di sostituire il codice, conserva una copia del file attuale in Note o in un file di testo.
+4. Incolla il nuovo contenuto di `app.py` e salva con **Commit changes**.
+5. Ripeti per `requirements.txt` e per gli altri file inclusi nel pacchetto, mantenendo i percorsi indicati.
+6. Attendi che Streamlit termini il redeploy; poi apri l'app e prova prima la scheda Mercati e una watchlist piccola.
+""")
+    st.link_button("Apri repository GitHub", "https://github.com/UchihaDD/ChatInvestment")
+    st.link_button("Apri app pubblicata", "https://chatinvestment-j4h8fgt8jx29p53tygykab.streamlit.app")
 
 st.divider()
-st.caption("Investment Scanner V2 · prototipo di ricerca quantitativa · nessun trading automatico · nessuna garanzia di rendimento.")
+st.caption(f"ChatInvestment • sessione {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} • Solo analisi informativa.")
